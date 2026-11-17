@@ -5,31 +5,39 @@ import android.hardware.ConsumerIrManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.view.Gravity
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var ir: ConsumerIrManager
     private lateinit var info: TextView
-    private lateinit var saved: TextView
     private val handler = Handler(Looper.getMainLooper())
     private val prefs by lazy { getSharedPreferences("tv", Context.MODE_PRIVATE) }
+    private val btns = HashMap<String, Button>()
 
+    private val addr = 0x01
+    private var cur = -1
     private var scanning = false
-    private var addr = 0
-    private var cmd = 0
+    private var learn = false
+
+    private val keys = listOf(
+        "Power" to "باور", "Mute" to "كتم", "Source" to "المصدر",
+        "Vol+" to "صوت +", "Vol-" to "صوت -", "CH+" to "قناة +",
+        "CH-" to "قناة -", "Up" to "↑", "Home" to "Home",
+        "Left" to "←", "OK" to "OK", "Right" to "→",
+        "Back" to "رجوع", "Down" to "↓", "Menu" to "قائمة"
+    )
 
     private fun nec(a: Int, c: Int): IntArray {
         val p = ArrayList<Int>()
         p += 9000; p += 4500
-        val data = (a and 0xFF) or
-                ((a.inv() and 0xFF) shl 8) or
-                ((c and 0xFF) shl 16) or
-                ((c.inv() and 0xFF) shl 24)
+        val data = (a and 0xFF) or ((a.inv() and 0xFF) shl 8) or
+                ((c and 0xFF) shl 16) or ((c.inv() and 0xFF) shl 24)
         for (i in 0 until 32) {
             p += 560
             p += if (((data shr i) and 1) == 1) 1690 else 560
@@ -38,22 +46,36 @@ class MainActivity : AppCompatActivity() {
         return p.toIntArray()
     }
 
-    private fun send(a: Int, c: Int) {
-        if (ir.hasIrEmitter()) ir.transmit(38000, nec(a, c))
+    private fun send(c: Int) {
+        if (ir.hasIrEmitter()) ir.transmit(38000, nec(addr, c))
     }
 
-    private fun label(a: Int, c: Int) = "address=0x%02X  command=0x%02X".format(a, c)
+    private fun show() { info.text = "address=0x01  command=0x%02X".format(cur.coerceAtLeast(0)) }
+
+    private fun saved(id: String) = prefs.getInt("k_$id", if (id == "Power") 0x10 else -1)
+
+    private fun refresh(id: String, ar: String) {
+        val s = saved(id)
+        btns[id]?.text = if (s >= 0) "$ar\n0x%02X".format(s) else ar
+    }
 
     private val scanStep = object : Runnable {
         override fun run() {
             if (!scanning) return
-            send(addr, cmd)
-            info.text = label(addr, cmd)
-            cmd++
-            if (cmd > 255) { cmd = 0; addr++ }
-            if (addr > 255) { scanning = false; info.text = "انتهى الفحص"; return }
-            handler.postDelayed(this, 700)
+            if (cur >= 255) { scanning = false; info.text = "انتهى الفحص"; return }
+            cur++; send(cur); show()
+            handler.postDelayed(this, 600)
         }
+    }
+
+    private fun tool(t: String, f: () -> Unit) = Button(this).apply {
+        text = t; setOnClickListener { f() }
+        layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+    }
+
+    private fun row(vararg v: Button) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        v.forEach { addView(it) }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -62,48 +84,50 @@ class MainActivity : AppCompatActivity() {
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(40, 80, 40, 40)
+            setPadding(24, 40, 24, 40)
         }
-
         info = TextView(this).apply { textSize = 20f; text = "جاهز" }
-        saved = TextView(this).apply {
-            textSize = 16f
-            text = "المحفوظ: " + label(prefs.getInt("a", 0), prefs.getInt("c", 0))
-        }
+        root.addView(info)
 
-        fun btn(t: String, onClick: () -> Unit) = Button(this).apply {
-            text = t; setOnClickListener { onClick() }
-        }
+        // أدوات الفحص
+        root.addView(row(
+            tool("فحص") { if (!scanning) { scanning = true; handler.post(scanStep) } },
+            tool("إيقاف") { scanning = false },
+            tool("السابق") { scanning = false; cur = (cur - 1).coerceAtLeast(0); send(cur); show() },
+            tool("التالي") { scanning = false; cur = (cur + 1).coerceAtMost(255); send(cur); show() }
+        ))
 
-        val start = btn("جرّب الأكواد") {
-            if (!scanning) { scanning = true; handler.post(scanStep) }
+        val learnBtn = tool("وضع التعلّم: مطفي") {}
+        learnBtn.setOnClickListener {
+            learn = !learn
+            learnBtn.text = if (learn) "وضع التعلّم: شغّال" else "وضع التعلّم: مطفي"
         }
-        val stop = btn("إيقاف") { scanning = false }
-        val back = btn("السابق") {
-            scanning = false
-            cmd--
-            if (cmd < 0) { cmd = 255; addr = (addr - 1).coerceAtLeast(0) }
-            send(addr, cmd); info.text = label(addr, cmd)
+        val power5 = tool("باور x5") {
+            val c = saved("Power")
+            for (i in 0 until 5) handler.postDelayed({ send(c) }, i * 350L)
         }
-        val save = btn("حفظ هذا الكود") {
-            var a = addr; var c = cmd - 1
-            if (c < 0) { c = 255; a = (a - 1).coerceAtLeast(0) }
-            prefs.edit().putInt("a", a).putInt("c", c).apply()
-            saved.text = "المحفوظ: " + label(a, c)
-        }
-        val power = btn("Power (المحفوظ)") {
-            send(prefs.getInt("a", 0), prefs.getInt("c", 0))
-        }
+        root.addView(row(learnBtn, power5))
 
-        listOf(info, start, stop, back, save, power, saved).forEach { root.addView(it) }
-        setContentView(root)
+        // شبكة الأزرار
+        keys.chunked(3).forEach { r ->
+            val bs = r.map { (id, ar) ->
+                tool(ar) {
+                    if (learn) {
+                        if (cur < 0) { Toast.makeText(this, "افحص أولاً", Toast.LENGTH_SHORT).show() }
+                        else { prefs.edit().putInt("k_$id", cur).apply(); refresh(id, ar) }
+                    } else {
+                        val s = saved(id)
+                        if (s >= 0) send(s) else Toast.makeText(this, "غير محفوظ", Toast.LENGTH_SHORT).show()
+                    }
+                }.also { btns[id] = it }
+            }
+            root.addView(row(*bs.toTypedArray()))
+        }
+        keys.forEach { (id, ar) -> refresh(id, ar) }
 
+        setContentView(ScrollView(this).apply { addView(root) })
         if (!ir.hasIrEmitter()) info.text = "الموبايل ما بيه IR"
     }
 
-    override fun onDestroy() {
-        scanning = false
-        super.onDestroy()
-    }
+    override fun onDestroy() { scanning = false; super.onDestroy() }
 }
